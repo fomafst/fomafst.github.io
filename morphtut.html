@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <link rel="stylesheet" href="github-markdown.css">
+  <style>
+      .markdown-body {
+          box-sizing: border-box;
+          min-width: 200px;
+          max-width: 980px;
+          margin: 0 auto;
+          padding: 45px;
+      }
+  </style>
+
+ <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" >
+ <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" >
+
+ <meta name="ROBOTS" content="NOARCHIVE">
+
+
+ <title>MorphologicalAnalysisTutorial -
+ foma -
+
+ A self-contained tutorial for building morphological analyzers. -
+ finite-state compiler and C library
+ </title>
+</head>
+
+<body class="t6">
+
+  <article class="markdown-body">
+
+
+ <div id="wikiheader">
+
+ <span style="font-size:120%;font-weight:bold">MorphologicalAnalysisTutorial</span>
+ &nbsp;
+ <div>
+
+ <i>A self-contained tutorial for building morphological analyzers.</i>
+<p>Author: Mans Hulden (2011)
+<br/><i>Rescued from now-defunct Google code page</i>
+
+
+ <br/>
+
+
+
+ </div>
+ </div>
+
+ <div id="wikicontent">
+ <div class="vt" id="wikimaincol">
+ <h1><a name="Morphological_analysis_with_FSTs"></a>Morphological analysis with FSTs<a href="#Morphological_analysis_with_FSTs" class="section_anchor"></a></h1><p>The following is a brief and basic tutorial on how to construct a <strong>morphological analyzer</strong> for a language using finite-state techniques.  A small toy grammar of English noun and verb inflection is built step-by-step to illustrate overall design issues.  While the grammar is small, much larger grammars can be built using the same design principles.  Basic familiarity with regular expressions and <i>foma</i> is assumed, such as is outlined in the <a href="https://github.com/mhulden/foma/blob/master/foma/docs/simpleintro.md">Getting started with foma</a> page. </p><h2><a name="Definition"></a>Definition<a href="#Definition" class="section_anchor"></a></h2><p>Since a &quot;morphological analyzer&quot; could mean any number of things, let&#x27;s first settle on a task description and define what the morphological analyzer is supposed to accomplish.  In this implementation, a morphological analyzer is taken to be a black box (as in Fig. 1), which happens to be implemented as a finite-state transducer, that translates word forms (such as <strong>runs</strong>) into a string that represents its morphological makeup, such as <strong>run+V+3p+Sg</strong>: a verb in the third person singular present tense.   </p><p><img src="morphtut3.png" /> </p><p>Naturally, if the word form is ambiguous (as <tt>runs</tt> is), the job of the analyzer is to output all tag sequences consistent with the grammar and the input word.  In the above example, the transducer should perhaps also output <strong>run+N+Pl</strong>, or some similar sequence to convey the possibility of a noun reading of <strong>runs</strong>.  Since finite-state transducers are inherently bidirectional devices, i.e. we can run a transducer in the inverse direction as well as the forward direction, the same FST, once we&#x27;ve built it, can serve both as a generator and an analyzer.  The standard practice is to build morphological transducers so that the <i>input</i> (or domain) side is the analysis side, and the <i>output</i> (or range) side contains the word forms. </p><p>In real life, morphological analyzers tend to provide much more detailed information than this.  Figure 2 shows a more elaborate analyzer&#x27;s output for Basque with the input work <strong>maiatzaren</strong>, together with an illustration about how a feature matrix can be recovered from the string output of the analyzer. </p><p><img src="basqueanalysis.png" /> </p><p>The goal is then is build a finite-state transducer that accomplishes this string-to-string mapping of analyses to surface forms and vice versa. </p><h1><a name="Design"></a>Design<a href="#Design" class="section_anchor"></a></h1><p>The construction of the final transducer will be broken down into two large components: </p><ul><li>A lexicon/morphotactics part </li><li>A phonological/morphophonological/orthographic part </li></ul><h2><a name="The_lexicon"></a>The lexicon<a href="#The_lexicon" class="section_anchor"></a></h2><p>The first component, which we call the lexicon component, will be a transducer that: </p><ul><li>Accepts as input only the valid stems/lemmas of the language, followed by only a legal sequence of <i>tags</i>. </li><li>Produces as output from these, an intermediate form, where the tags are replaced by the morphemes that they correspond to. </li><li>May produce additional symbols in the output, such as special symbols that serve to mark the presence of morpheme boundaries. </li></ul><p>For example, in the analyzer about to be constructed, the lexicon component FST will perform the following mappings: </p><pre class="prettyprint">c a t +N +Pl      w a t c h +N +Pl      w a t c h +V +3P +Sg     (input side)
+c a t ^  s        w a t c h ^  s        w a t c h ^  s           (output side)</pre><p>There are two things to note here.  The first is that we are using the symbol <tt>^</tt> to mark a morpheme boundary.  The second is that while each letter in the stem is represented by its own symbol (<tt>w,a,t,c,h,</tt> etc.), each complete tag <i>is</i> one separate symbol, a <i>multicharacter symbol</i> (<tt>+N, +Pl,</tt> etc.)  The spaces in the above show the symbol boundaries to illustrate this.  Figure 3 shows what a lexicon transducer that only encoded these three words would look like. Naturally, we will have some more features and a larger lexicon in what is described below. </p><p><img src="minilex.png" /> </p><p>The part that accomplishes this, the lexicon transducer, will be written in a formalism called <i>lexc</i>.  While it is possible to construct the lexicon transducer through regular expressions in <i>foma</i>, the <i>lexc</i>-formalism is more suited for lexicon construction and expressing morphotactics. </p><h2><a name="Alternation_rules"></a>Alternation rules<a href="#Alternation_rules" class="section_anchor"></a></h2><p>The role of the alternation rules is to modify the output of the lexicon transducer according to orthographic, phonological, and morphophonological rules and conventions.  So far, for example, we&#x27;ve assumed that English nouns can be pluralized by concatenating the morpheme <strong>s</strong> with the stem (<tt>cat</tt> → <tt>cats</tt>).  However, some nouns, those where the stem ends in a sibilant, have the allomorph <strong>es</strong> (<tt>watch</tt> → <tt>watches</tt>).  A way to describe the process of forming correct nouns is to <i>always</i> represent the plural as the morpheme <strong>s</strong> as we have, and <i>then</i> subject these word forms to alternation rules that <i>insert</i> an <strong>e</strong> only if the stem ends in a sibilant.  This, among others, is the task of the alternation rules component: to produce the valid surface forms from the intermediate forms output by the lexicon transducer. </p><p>Since alternation rule FSTs that are conditioned by their environment are very difficult to construct by hand, we use the replacement rules formalism in <i>foma</i> to compile the necessary rules into FSTs. </p><p>After the necessary replacement rules have been built, we combine the lexicon FST and these various FSTs that encode such alternations as <strong>e</strong>-insertions, into one large transducer that acts like a cascade: a single transducer that has the same effect as would providing an input word to the lexicon transducer, take its output and feed it into the first rule transducer, take it&#x27;s output, then feed it into the next rule transducer, and so on.   </p><p>This is accomplished by the regular expression composition operator (.o.). Suppose we have the lexicon transducer in an FST we&#x27;ve named <tt>Lexicon</tt>, and the various alternation rules as FSTs named <tt>Rule1</tt>, ..., <tt>RuleN</tt> (in reality we might want to use more perspicuous names).  Now, we can issue the regular expression: </p><pre class="prettyprint">Lexicon .o. Rule1 .o. Rule2 .o. ... .o. RuleN ;</pre><p>and produce a single transducer that is the composite of the different rule transducers and the lexicon transducer. </p><p>This idea is illustrated in figure 4. </p><p><img src="morphtut4.png" /> </p><p>This is indeed one of the main reasons to use finite-state transducers for morphological analysis: the fact that we can describe the word-formation rules in the direction of <i>generation</i>, but in fact use the final FST in the other direction.  It would be trivial to write little programs (in one&#x27;s programming language of choice) to perform the lexicon mapping and the alternation rules mappings, each little program&#x27;s output being fed as the next program&#x27;s input, and so provide a model for generation.  But with such a model, we generally have no way to perform analysis.  The fact that we can calculate the composition of each individual transducer, is what makes this possible. </p><p>Although we write the grammar in the direction of generation, we at the same time produce an analyzer, or parser.  This is because the final product is represented as one single transducer and transducers operate just as easily in the inverse direction.  All the software has to when parsing (applying the transducer in the inverse direction), is to follow the output labels on each transition that correspond to the word to parsed, and output the matching input labels.   </p><h2><a name="The_lexicon_script"></a>The lexicon script<a href="#The_lexicon_script" class="section_anchor"></a></h2><p>As mentioned, the lexicon script that will be a transducer that maps analysis forms to intermediate forms will be written in the lexc-formalism and stored in a text file, which we call <tt>english.lexc</tt>.  This file can be compiled into a transducer in the main foma interface. </p><h2><a name="The_facts_to_be_modeled"></a>The facts to be modeled<a href="#The_facts_to_be_modeled" class="section_anchor"></a></h2><p>Before moving further, let&#x27;s narrow down the details we want to capture in our analyzer. </p><p>We&#x27;ll want to include the following noun/verb features into the grammar. </p><ul><li>Nouns: singular (<strong>cat</strong>) vs. plural (<strong>cats</strong>) </li><li>Verbs: infinitive (<strong>watch</strong>), 3rd person singular (<strong>watches</strong>), past tense (<strong>watched</strong>), past participle (<strong>watched</strong>), and present participle (<strong>watching</strong>) </li></ul><h4><a name="Tags"></a>Tags<a href="#Tags" class="section_anchor"></a></h4><p>We&#x27;ll also want to use the following tags for marking the above grammatical information. </p><ul><li><tt>+N</tt> for nouns </li><li><tt>+V</tt> for verbs </li><li><tt>+3P</tt> for third person </li><li><tt>+Sg</tt> for singular forms </li><li><tt>+Pl</tt> for plural forms </li><li><tt>+Past</tt> for past tense </li><li><tt>+PastPart</tt> for past participle  </li><li><tt>+PresPart</tt> for present participle </li></ul><h2><a name="The_lexc-script"></a>The lexc-script<a href="#The_lexc-script" class="section_anchor"></a></h2><p>The lexc-formalism operates under the simple notion of continuation classes.  One declares a set of labeled lexicons, the content of those lexicons, and rules which dictate how lexicon entries are to be concatenated. </p><p>The entire lexc-script is given further below; here, we provide a line-by-line analysis of it. </p><p>First, in the lexc-formalism, we need to declare those symbols that are to be multicharacter strings: </p><pre class="prettyprint">Multichar_Symbols +N +V +PastPart +Past +PresPart +3P +Sg +Pl</pre><p>Then, we must declare a <tt>Root</tt> lexicon.  The <tt>Root</tt> lexicon is where we start building a word: </p><pre class="prettyprint">LEXICON Root
+
+Noun ;
+Verb ;</pre><p>Here we declared a lexicon called Root, and provided it with two entries. Both entries are empty (there is no left-hand side), and by choosing one of these, we can move to either the <tt>Noun</tt> or the <tt>Verb</tt> lexicon. </p><p>The <tt>Noun</tt> lexicon looks as follows: </p><pre class="prettyprint">LEXICON Noun
+
+cat   Ninf;
+city  Ninf;
+fox   Ninf;
+panic Ninf;
+try   Ninf;
+watch Ninf;</pre><p>Here, we have six entries.  All of these entries continue to the <tt>Ninf</tt> lexicon.  </p><pre class="prettyprint">LEXICON Verb
+
+beg   Vinf;
+fox   Vinf;
+make  Vinf;
+panic Vinf;
+try   Vinf;
+watch Vinf;</pre><p>The Verb lexicon also has six entries, and if their continuation lexicon is the <tt>Vinf</tt>-lexicon for all of them. </p><pre class="prettyprint">LEXICON Ninf
+
++N+Sg:0   #;
++N+Pl:^s  #;</pre><p>Now, the Ninf-lexicon has two entries, and unlike in the previous lexicons we&#x27;ve seen, both entries specify the <i>input</i> string and <i>output</i> string separately.  For example, the entry <tt>+N+Sg:0</tt> specifies that the input side contains <tt>+N+Sg</tt> and the output side the empty string.  The continuation lexicon for both is <tt>#</tt>, meaning end-of-word.  So, for example, if we chose from the <tt>Root</tt> lexicon to enter the <tt>Noun</tt> lexicon, and from there chose the <tt>cat</tt> entry, and in this lexicon chose the <tt>+N+Sg:0</tt> entry, we would have constructed the input-output pairing: </p><pre class="prettyprint">c a t +N +Sg
+c a t</pre><p>In the Vinf lexicon we have likewise: </p><pre class="prettyprint">LEXICON Vinf
+
++V:0             #;
++V+3P+Sg:^s      #;
++V+Past:^ed      #;
++V+PastPart:^ed  #;
++V+PresPart:^ing #;</pre><p>Here, we have a few more entries, one for each verb form.  We also use the morpheme boundary symbol <tt>^</tt>, which will be taken advantage of in the triggering contexts by the replacement rules. </p><p>In foma we can compile the <tt>english.lexc</tt> script into a transducer by issuing the <tt>read lexc</tt>-command. </p><pre class="prettyprint">foma[0]: read lexc english.lexc
+Root...2, Noun...6, Verb...6, Ninf...2, Vinf...5
+Building lexicon...Determinizing...Minimizing...Done!
+1.7 kB. 32 states, 46 arcs, 42 paths.
+foma[1]:</pre><p>Now, we&#x27;ve added the lexicon transducer on the stack, and can label it for subsequent use: </p><pre class="prettyprint">foma[1]: define Lexicon;
+defined Lexicon: 1.7 kB. 32 states, 46 arcs, 42 paths.
+foma[0]:</pre><p>Figure 5 shows what this lexicon transducer actually looks like. </p><p><img src="englex.png" /> </p><p>We can also test it against some words to see that it gives the desired intermediate forms: </p><pre class="prettyprint">  foma[0]: regex Lexicon;
+  1.7 kB. 32 states, 46 arcs, 42 paths.
+  foma[1]: down
+  apply down&gt; watch+V+PastPart
+  watch^ed
+  apply down&gt; city+N+Pl
+  city^s
+  apply down&gt;</pre><p>Here is the complete lexc-file in one chunk: </p><pre class="prettyprint">!!!english.lexc!!!
+
+Multichar_Symbols +N +V +PastPart +Past +PresPart +3P +Sg +Pl
+
+LEXICON Root
+
+Noun ;
+Verb ;
+
+LEXICON Noun
+
+cat   Ninf;
+city  Ninf;
+fox   Ninf;
+panic Ninf;
+try   Ninf;
+watch Ninf;
+
+LEXICON Verb
+
+beg   Vinf;
+fox   Vinf;
+make  Vinf;
+panic Vinf;
+try   Vinf;
+watch Vinf;
+
+LEXICON Ninf
+
++N+Sg:0   #;
++N+Pl:^s  #;
+
+LEXICON Vinf
+
++V:0             #;
++V+3P+Sg:^s      #;
++V+Past:^ed      #;
++V+PastPart:^ed  #;
++V+PresPart:^ing #;</pre><h1><a name="The_alternation_rules_component"></a>The alternation rules component<a href="#The_alternation_rules_component" class="section_anchor"></a></h1><p>Having accomplished the first part of the grammar construction, we now turn to the alternation rules component.  The idea is to construct a set of ordered rule transducers that modify the intermediate forms output by the lexicon component.  At the very least we will need to remove the <tt>^</tt>-symbol which is used to separate morpheme boundaries before we produce valid surface forms.  This will in fact be the <i>last</i> rule transducer in the cascade.  Before that rule applies, however, there is a number of rules that are needed for orthographic and phonological adjustment. </p><h2><a name="The_facts_to_be_modeled"></a>The facts to be modeled<a href="#The_facts_to_be_modeled" class="section_anchor"></a></h2><h3><a name="e-deletion"></a>e-deletion<a href="#e-deletion" class="section_anchor"></a></h3><p>Stems that end in a silent <tt>e</tt> drop the <tt>e</tt> with certain suffixes (<tt>ing</tt> and <tt>ed</tt> in our case).  For example, <tt>make</tt> → <tt>making</tt>.  This can be captured by: </p><pre class="prettyprint">define EDeletion e -&gt; 0 || _ &quot;^&quot; [ i n g | e d ] ;</pre><p>In other words, applying the rule to the output of the lexicon component, we get changes like: </p><pre class="prettyprint">m a k e +V +PresPart        (lexicon input)
+m a k e ^  i         n g    (lexicon output)
+m a k   ^  i         n g    (after e-deletion)</pre><h3><a name="e-insertion"></a>e-insertion<a href="#e-insertion" class="section_anchor"></a></h3><p>We also have an <strong>e</strong>-insertion rule: whenever a stem ends in a sibilant and is followed by the plural morpheme <tt>s</tt> (<tt>watch</tt> → <tt>watches</tt>).  Sibilants can be defined orthographically by <tt>s</tt>, <tt>z</tt>, <tt>x</tt>, <tt>c h</tt>, and <tt>s h</tt>.  The rule then looks like: </p><pre class="prettyprint">define EInsertion [..] -&gt; e || s | z | x | c h | s h _ &quot;^&quot; s ;</pre><p>Note that the above rule will work for the words we&#x27;ve defined in our lexicon.  However, the sibilant representation in English orthography is not entirely consistent.  For example, a word such as <tt>monarch</tt> would trigger the rule and incorrectly yield <tt>*monarches</tt> in the plural.  One way to handle such exceptions is to rewrite the <tt>c h</tt> sequence in the lexicon component with some symbol that will not trigger <strong>e-insertion</strong> (say <tt>K</tt>), which is then rewritten back to <tt>c h</tt> after all the rules have applied. </p><h3><a name="y-replacement"></a>y-replacement<a href="#y-replacement" class="section_anchor"></a></h3><p>The <strong>y-replacement</strong> rule which acts in constructions such as <tt>try</tt> → <tt>tries</tt> and <tt>try</tt> → <tt>tried</tt> is perhaps best broken into two parts.  Consider the corresponding input-intermediate form pairings: </p><pre class="prettyprint">    (1)                   (2)
+t r y   +V +3P +Sg    t r y +V +PastPart      (lex in)
+t r y   ^  s          t r y ^  e          d   (lex out)
+t r i e ^  s          t r i ^  e          d   (desired rule output)</pre><p>Now, in the event that the verb ends in <strong>y</strong> and is followed by morpheme boundary <strong>s</strong> (1), we want to change the <strong>y</strong> into <strong>i e</strong>, whereas case (2) requires only changing the <strong>y</strong> into <strong>i</strong>.  We can accomplish this by having two separate rules combined with composition, or as is done below, as two parallel rules: </p><pre class="prettyprint">define YReplacement y -&gt; i e || _ &quot;^&quot; s    ,,
+                    y -&gt; i   || _ &quot;^&quot; e d  ;</pre><p>Note the <tt>,,</tt> which separates two distinct parallel rules.  These rules are not joined by composition, rather, they operate simultaneously and independently.  For this particular case it is of no importance whether the two rules apply simultaneously or one after the other, but for other cases the output may well be different. </p><h3><a name="k-insertion"></a>k-insertion<a href="#k-insertion" class="section_anchor"></a></h3><p>Verbs that end in a <strong>c</strong> (corresponding to a phonological <tt>k</tt>), add a <tt>k</tt> before the morpheme boundary if followed by an affix beginning with a vowel.  For example <tt>panic</tt> → <tt>panicking</tt>, <tt>panicked</tt>.  We can identify quite accurately when the <strong>k</strong> needs to be inserted as it is preceded by a vowel in those cases (as opposed to, say the verb construction <tt>arc</tt> → <tt>arcing</tt>).  The rule can then be captured by: </p><pre class="prettyprint">define KInsertion [..] -&gt; k || C V c _ &quot;^&quot; V;</pre><p>Of course, this rule relies on us having defined V as our set of vowel symbols. </p><p>Note the <strong><tt>[..]</tt></strong>-construction on the LHS.  Here, using an epsilon (<tt>0</tt>) as the left hand side will not do.  The rule formalism is such that if a <tt>0</tt> were used on the LHS, we would insert a potentially infinite number of <strong>k</strong>-symbols.  The special construction <strong><tt>[..]</tt></strong> forces epsilon insertions to restrict themselves to maximally one insertion per potential insertion site. </p><h3><a name="Consonant_doubling_(gemination)"></a>Consonant doubling (gemination)<a href="#Consonant_doubling_(gemination)" class="section_anchor"></a></h3><p>Consonant doubling is really the same phenomenon as the <strong>k-insertion</strong>.  We double final consonants in the stem in certain environments: <tt>beg</tt> → <tt>begging</tt>, <tt>run</tt> → <tt>runnable</tt>, etc.  Our lexicon contains only one such word (<strong>beg</strong>), so we can make do with a simple rule: </p><pre class="prettyprint">define ConsonantDoubling g -&gt; g g || C V _ &quot;^&quot; V;</pre><p>For a more thorough treatment, we&#x27;d also need to add rules for the other consonants.  Although, this again is a phenomenon that is not perfectly capturable without additional knowledge as to the pronunciation of the word.  The consonant doubling only happens when the final syllable of the stem is <i>stressed</i>.  Compare <tt>commit</tt> → <tt>committing</tt> and <tt>edit</tt> → <tt>editing</tt>.  The latter word fulfills the structural requirements of the rewrite rule (a <tt>C V</tt> sequence before the consonant to be doubled), yet the gemination isn&#x27;t permitted. </p><h3><a name="Auxiliary_symbol_removal"></a>Auxiliary symbol removal<a href="#Auxiliary_symbol_removal" class="section_anchor"></a></h3><p>Naturally, as the last rule, we need to remove the auxiliary <tt>^</tt>, whose presence has been necessary for the correct definition of the alternation rules.  The last rule removes these, after which we&#x27;ve produced valid surface forms: </p><pre class="prettyprint">define Cleanup &quot;^&quot; -&gt; 0;</pre><h2><a name="Compiling_the_grammar"></a>Compiling the grammar<a href="#Compiling_the_grammar" class="section_anchor"></a></h2><p>In the same script that compiles the replacement rules, we also read in the lexc-file, and label it <tt>Lexicon</tt>, so we can use that label in subsequent regular expressions. </p><pre class="prettyprint">read lexc english.lexc
+define Lexicon;</pre><p>Having defined and labeled all the necessary rules and the lexicon, these can be composed by: </p><pre class="prettyprint">regex Lexicon           .o.
+      ConsonantDoubling .o.
+      EDeletion         .o.
+      EInsertion        .o.
+      YReplacement      .o.
+      KInsertion        .o.
+      Cleanup;</pre><h2><a name="Testing_the_grammar"></a>Testing the grammar<a href="#Testing_the_grammar" class="section_anchor"></a></h2><p>Having at our disposal the two files <tt>english.lexc</tt> and <tt>english.foma</tt>, we can simply run the <tt>.foma</tt>-file from the interface which will compile the lexicon and the replacement rules and join them all by composition. </p><pre class="prettyprint">foma[0]: source english.foma
+Opening file &#x27;english.foma&#x27;.
+defined V: 405 bytes. 2 states, 5 arcs, 5 paths.
+Root...2, Noun...6, Verb...6, Ninf...2, Vinf...5
+Building lexicon...Determinizing...Minimizing...Done!
+1.7 kB. 32 states, 46 arcs, 42 paths.
+defined Lexicon: 1.7 kB. 32 states, 46 arcs, 42 paths.
+defined ConsonantDoubling: 1.1 kB. 11 states, 47 arcs, Cyclic.
+defined EDeletion: 1.2 kB. 11 states, 52 arcs, Cyclic.
+defined EInsertion: 1.1 kB. 7 states, 43 arcs, Cyclic.
+defined YReplacement: 998 bytes. 9 states, 36 arcs, Cyclic.
+defined KInsertion: 1.9 kB. 12 states, 89 arcs, Cyclic.
+defined Cleanup: 324 bytes. 1 states, 2 arcs, Cyclic.
+2.2 kB. 47 states, 70 arcs, 42 paths.
+foma[1]:</pre><p>Now we can test the resulting transducer in the analysis direction: </p><pre class="prettyprint">foma[1]: up
+apply up&gt; tries
+try+V+3P+Sg
+try+N+Pl
+apply up&gt; panicking
+panic+V+PresPart
+apply up&gt; [CTRL-D]</pre><p>and the generation direction: </p><pre class="prettyprint">foma[1]: down
+apply down&gt; beg+V+PresPart
+begging
+apply down&gt; watch+N+Pl
+watches
+apply down&gt;</pre><p>Here is the complete <tt>english.foma</tt>-file: </p><pre class="prettyprint">### english.foma ###
+
+# Vowels
+define V [ a | e | i | o | u ];
+
+read lexc english.lexc
+define Lexicon;
+
+# Consonant doubling: 1-letter consonant doubled before -ing/-ed (beg/begging)
+define ConsonantDoubling g -&gt; g g || _ &quot;^&quot; [i n g | e d ];
+
+# E deletion: silent e dropped before -ing and -ed (make/making)
+define EDeletion e -&gt; 0 || _ &quot;^&quot; [ i n g | e d ] ;
+
+# E insertion e added after -s, -z, -x, -ch, -sh before s (watch/watches)
+define EInsertion [..] -&gt; e || s | z | x | c h | s h _ &quot;^&quot; s ;
+
+# Y replacement: -y changes to -ie before -s, -i before -ed (try/tries)
+define YReplacement y -&gt; i e || _ &quot;^&quot; s    ,,
+                    y -&gt; i   || _ &quot;^&quot; e d  ;
+
+# K insertion: verbs ending with vowel + -c add -k (panic/panicked)
+define KInsertion [..] -&gt; k || V c _ &quot;^&quot; [e d | i n g];
+
+# Cleanup: remove morpheme boundaries
+define Cleanup &quot;^&quot; -&gt; 0;
+
+read lexc english.lexc
+define Lexicon
+
+define Grammar Lexicon           .o.
+               ConsonantDoubling .o.
+               EDeletion         .o.
+               EInsertion        .o.
+               YReplacement      .o.
+               KInsertion        .o.
+               Cleanup;
+
+regex Grammar;</pre><h3><a name="Additional_testing"></a>Additional testing<a href="#Additional_testing" class="section_anchor"></a></h3><p>We can also list all the input/output pairs of the words with the <tt>pairs</tt>-command: </p>
+
+<pre>
+  foma[1]: pairs
+  cat+N+Sg	cat
+  cat+N+Pl	cats
+  city+N+Pl	cities
+  city+N+Sg	city
+  try+V+PastPart	tried
+  try+V+Past	tried
+  try+V+3P+Sg	tries
+  try+N+Pl	tries
+  try+V	try
+  try+V+PresPart	trying
+  try+N+Sg	try
+  panic+V	panic
+  panic+V+3P+Sg	panics
+  panic+N+Sg	panic
+  panic+N+Pl	panics
+  panic+V+PresPart	panicking
+  panic+V+PastPart	panicked
+  panic+V+Past	panicked
+  watch+V	watch
+  watch+V+PresPart	watching
+  watch+V+PastPart	watched
+  watch+V+Past	watched
+  watch+V+3P+Sg	watches
+  watch+N+Pl	watches
+  watch+N+Sg	watch
+  make+V	make
+  make+V+3P+Sg	makes
+  make+V+PresPart	making
+  make+V+PastPart	maked
+  make+V+Past	maked
+  beg+V	beg
+  beg+V+3P+Sg	begs
+  beg+V+PresPart	begging
+  beg+V+PastPart	begged
+  beg+V+Past	begged
+  fox+V	fox
+  fox+V+PresPart	foxing
+  fox+V+PastPart	foxed
+  fox+V+Past	foxed
+  fox+V+3P+Sg	foxes
+  fox+N+Pl	foxes
+  fox+N+Sg	fox
+  foma[1]:
+</pre>
+
+<p>Here, eyeballing the results, we see that we&#x27;ve made a slight overgeneralization: the surface form <strong>maked</strong> is incorrect.  How to solve this, and other exceptional forms in the grammar, will be addressed below.   </p><h3><a name="Saving_the_resulting_transducer"></a>Saving the resulting transducer<a href="#Saving_the_resulting_transducer" class="section_anchor"></a></h3><p>Having compiled the analyzer/generator transducer, we can also save it into a file with the <tt>save stack</tt>-command: </p><pre class="prettyprint">foma[1]: save stack english.bin
+Writing to file english.bin.
+foma[1]:</pre><p>For large grammars, loading the <tt>binary</tt> file format will in general be much faster than recompiling the grammar.  However, if we need to make changes to the grammar, recompilation becomes necessary.  The binary tranducer format is also necessary to use the analyser/generator with the external utility <tt>flookup</tt>.  This is a simple way (outside of the <i>foma</i> API) to connect a morphological analyzer to other applications. </p><h3><a name="Running_the_transducer_with_the_flookup_utility"></a>Running the transducer with the flookup utility<a href="#Running_the_transducer_with_the_flookup_utility" class="section_anchor"></a></h3><p>Assuming we&#x27;ve stored the transducer in <tt>english.bin</tt>, we can also use the generic <tt>flookup</tt> utility to use the transducer.  The <tt>flookup</tt> utility reads a transducer from a given file, and the reads words from stdin, yielding the transducer output to stdout: </p><pre class="prettyprint">$ echo &quot;begging&quot; | flookup english.bin
+begging	beg+V+PresPart
+$</pre><p>By default the <tt>flookup</tt> applies words in the inverse (analysis) direction of the transducer (as apply up in the <tt>foma</tt> interface).  If we want to generate, we can run <tt>flookup</tt> with the <tt>-i</tt> flag. </p><pre class="prettyprint">$ echo &quot;beg+V+PresPart&quot; | flookup -i english.bin
+beg+V+PresPart	begging
+$</pre><h1><a name="Grammar_tweaking:_Adding_exceptions_(irregular_forms)"></a>Grammar tweaking: Adding exceptions (irregular forms)<a href="#Grammar_tweaking:_Adding_exceptions_(irregular_forms)" class="section_anchor"></a></h1><p>At this point, let&#x27;s return to the concern about generating the incorrect form <tt>maked</tt> from <tt>make+V+PastPart</tt> and <tt>make+V+Past</tt>.  This is clearly not a phonological/orthographic issue that we would want to mend by adding a rewrite rule.  Such a rule would only target those particular word forms (which are really exceptions), so we might as well treat it as an exception by listing it as such.  There are a couple of options regarding how to model exceptional forms in <i>foma</i>.  One straightforward way is to simply list the exceptional forms in the lexicon so that they bypass the replacement rules.  Another way is to write a separate mini-grammar for exceptions which is joined together with the main grammar by the union or priority union operations. </p><h2><a name="Exceptions_in_LEXC"></a>Exceptions in LEXC<a href="#Exceptions_in_LEXC" class="section_anchor"></a></h2><p>The way to go about this in lexc is to bypass word formation at a certain point.  For example, <tt>make</tt> is listed as: </p><pre class="prettyprint">make  Vinf;</pre><p>where <tt>Vinf</tt> is the continuation class that handles all the verb inflection.  Now, we could replace this line by: </p><pre class="prettyprint">make+V:make            #;
+make+V+PresPart:making #;
+make+V+Past:made       #;
+make+V+PastPart:made   #;</pre><p>In effect, this lists all the pairings of <tt>make</tt> and its analysis to its surface form separately.  Note the the continuation lexicon is now <tt>#</tt> for all these forms, since we need to bypass <tt>Vinf</tt> altogether as these words no longer need to be affixed with inflectional affixes. </p><p>For single words, or a few entries, this method will work fine.  For larger projects, it is advisable to write small subgrammars that are combined with the regular grammars through priority union, as is explained below. </p><h2><a name="Exceptions_by_priority_union"></a>Exceptions by priority union<a href="#Exceptions_by_priority_union" class="section_anchor"></a></h2><p>Priority union (.P.) is a special operation that works exactly like regular union (|) in most cases.  That is, if we have two mappings <tt>A</tt> and <tt>B</tt>, <tt>A .P. B</tt> will perform the mapping that either <tt>A</tt> or <tt>B</tt> would.  However, the priority union of <tt>A</tt> and <tt>B</tt>, as opposed to regular union, additionally discards those relations from <tt>B</tt> that have a corresponding input in <tt>A</tt>.  This idea can be used to combine two grammars, an &#x27;exception&#x27; grammar and a &#x27;regular&#x27; grammar.  Fig. 6 illustrates the approach. </p><p><img src="priorityunionengl.png" /> </p><p>In other words, if we had an &#x27;exceptions&#x27; transducer that only contained the irregular form mappings, we could combine this with the regular transducer as follows.  </p><pre class="prettyprint">define Exceptions [[{make} &quot;+V&quot; &quot;+Past&quot; .x. {made}] | [{make} &quot;+V&quot; &quot;+PastPart&quot; .x. {made}]] ;
+regex Exceptions .P. Grammar ;</pre><h1><a name="Grammar_tweaking:_adding_exceptions_(parallel_forms)"></a>Grammar tweaking: adding exceptions (parallel forms)<a href="#Grammar_tweaking:_adding_exceptions_(parallel_forms)" class="section_anchor"></a></h1><p>Although the grammar above does not include words that have parallel or alternate forms, the need to accommodate such words is typical.  In English, for example, we may have a need to be able to parse latinate or greek plural forms alongside the regular anglicized forms in words such as <strong>cactuses/cacti</strong>, <strong>indexes/indices</strong>, <strong>formulae/formulas</strong>. </p><h2><a name="Parallel_forms_in_LEXC"></a>Parallel forms in LEXC<a href="#Parallel_forms_in_LEXC" class="section_anchor"></a></h2><p>If we had an entry for <tt>cactus</tt> in the above <tt>Noun</tt> lexicon, the regular form would of course be produced correctly by the grammar as-is: </p><pre class="prettyprint">...
+cactus            Ninf;
+...</pre><p>To also produce the alternate form <strong>cacti</strong>, we can again hard-wire this into the <i>lexc</i> definition; however, this time without removing the regular entry: </p><pre class="prettyprint">...
+cactus            Ninf;
+cactus+N+Pl:cacti #;</pre><p>Now, the regular entry <tt>cactus</tt> with the continuation class <tt>Ninf</tt> handles the regular pluralization, while we&#x27;ve also listed an irregular one, which is not followed by any continuation class but by end-of-word (<tt>#</tt>). </p><h2><a name="Parallel_forms_with_union"></a>Parallel forms with union<a href="#Parallel_forms_with_union" class="section_anchor"></a></h2><p>Similar to the exceptional forms, we can also construct a separate grammar containing alternate forms, and then union in this grammar with the main, regular, grammar.  Assuming we&#x27;ve defined our irregular mappings in <tt>`ParallelForms</tt><tt>, we can easily produce the union by </tt>ParallelForms | Grammar`.  For the simple example above of including <strong>cacti</strong> as a parallel form, we could issue: </p><pre class="prettyprint">define ParallelForms [c a c t u s %+N %+Pl .x. c a c t i ];
+regex ParallelForms | Grammar ;</pre><p>assuming of course we&#x27;ve already defined <tt>Grammar</tt> (as is done in <tt>english.foma</tt>). </p><h2><a name="Including_both_parallel_and_exceptional_forms"></a>Including both parallel and exceptional forms<a href="#Including_both_parallel_and_exceptional_forms" class="section_anchor"></a></h2><p>In many cases, we will build separate subgrammars for the exceptional forms and the parallel forms.  These can be combined with the main grammar using both union and priority union.  Assume we&#x27;ve defined the <tt>Grammar</tt>, <tt>ParallelForms</tt> and <tt>Exceptions</tt>.  In the example below, we will provide simple definitions of these for the sake of illustration, but these subgrammars themselves can in actual applications be fairly elaborate and contain their own <i>lexc</i>-code and replacement rules, just like the main grammar: </p><pre class="prettyprint">define ParallelForms [c a c t u s %+N %+Pl .x. c a c t i ];
+define Exceptions [[{make} &quot;+V&quot; &quot;+Past&quot; .x. {made}] | [{make} &quot;+V&quot; &quot;+PastPart&quot; .x. {made}]] ;</pre><p>Now, we can combine the two with the main grammar as follows: </p><pre class="prettyprint">regex Exceptions .P. [Grammar | ParallelForms] ;</pre><hr/><h1><a name="Advanced:_long-distance_dependencies_and_flag_diacritics"></a>Advanced: long-distance dependencies and flag diacritics<a href="#Advanced:_long-distance_dependencies_and_flag_diacritics" class="section_anchor"></a></h1><p>In some cases, we need to model long-distance dependencies between morphemes - something that is not easy to do in the <i>lexc</i>-formalism.  Flag diacritics offer a way to perform long-distance dependency checks during word formation. </p><p>English morphology has few (if any) truly general long-distance dependencies, but to have a concrete example to illustrate the technique with, let&#x27;s consider the following verbs and deverbal adjectives: </p><pre class="prettyprint">undrinkable+Adj
+unpayable+Adj
+undoable+Adj
+drinkable+Adj
+payable+Adj
+doable+Adj
+*undrink+V+Inf
+*unpay+V+Inf
+undo+V+Inf</pre><p>To write a <i>lexc</i>-grammar that captures everything (except the two forms we have deemed ungrammatical), we could presumably do something like the following skeleton: </p><pre class="prettyprint">Multichar_Symbols +V +Inf +Adj +Pl UN+
+
+LEXICON Root
+Prefix;
+
+LEXICON Prefix
+UN+:un Verb;
+       Verb;
+
+LEXICON Verb
+
+do    Vinf;
+drink Vinf;
+pay   Vinf;
+
+
+LEXICON Vinf
+
+able    Adjinf;
++V+Inf:0  #;
+
+LEXICON Adjinf
++Adj:0      #;
++Adj+Pl:s   #;</pre><p>The script now generates all <tt>3*6 = 18</tt> combinations of: </p><pre class="prettyprint">VERB
+VERB+able
+VERB+ables
+un+VERB
+un+VERB+able
+un+VERB+ables</pre><p>To address the two wordforms that shouldn&#x27;t be allowed (<tt>*</tt><strong>undrink</strong> and <tt>*</tt><strong>unpay</strong>) the first problem is that, somehow, the <tt>Vinf</tt>-lexicon should be aware if the <tt>UN+</tt> prefix had been selected from the prefix lexicon and in that case force the selection of <tt>able</tt> to disallow <tt>*undrink</tt>, for example. This is tricky to manage in a clean way in the continuation-class formalism of <i>lexc</i>.  The second problem is that we don&#x27;t want this restriction to apply in the case of <tt>doable</tt>.  Both of these restrictions can be accomplished by the use of flag diacritic symbols placed into the grammar which gives a more fine-grained control over co-occurrence. </p><h3><a name="Flag_diacritics_to_control_co-occurrence"></a>Flag diacritics to control co-occurrence<a href="#Flag_diacritics_to_control_co-occurrence" class="section_anchor"></a></h3><p>Flag diacritics are &quot;invisible&quot; symbols that allow one to express constraints between disjoint parts of words.  All flag symbols in a grammar are of the following format: </p><ul><li>`@FLAGTYPE.FEATURE.VALUE@ </li></ul><p>The flag values and features are arbitrary strings, and up to the user to decide.  During application of a transducer, the runtime of <i>foma</i> will decide whether or not a word is to be accepted depending on which flags co-occur in the same word.  A good way to handle co-occurrence problems is generally to drop suitable flags by certain morphemes, which then prevents them from combining, but leaving the flags invisible to the user. </p><p>The different flag types are  </p><ul><li><tt>U</tt> unify features <tt>@U.FEATURE.VALUE@</tt> </li><li><tt>P</tt> positive set <tt>@P.FEATURE.VALUE@</tt> </li><li><tt>N</tt> negate <tt>@N.FEATURE.VALUE@</tt> </li><li><tt>R</tt> require feature/value <tt>@R.FEATURE.VALUE@</tt> or <tt>@R.FEATURE@</tt> </li><li><tt>D</tt> disallow feature/value <tt>@D.FEATURE.VALUE@</tt> or <tt>@D.FEATURE@</tt> </li><li><tt>C</tt> clear feature <tt>@C.FEATURE@</tt> </li><li><tt>E</tt> require equal feature/values <tt>@E.FEATURE.VALUE@</tt> </li></ul><p>We will not use all of the flag types here, and restrict ourselves only to a few, namely <strong>positive</strong> (<tt>P</tt>), <strong>clear</strong> (<tt>C</tt>), and <strong>disallow</strong> (<tt>D</tt>) which set a value to a feature, clear a feature, and disallow a feature to have certain (or any) values, respectively. </p><p>The functioning of flags is best illustrated through an example.  Let&#x27;s add some flags to the previous lexc-script: </p><pre class="prettyprint">Multichar_Symbols +V +Inf +Adj +Pl UN+ @P.UN.ON@ @D.UN@ @C.UN@
+
+LEXICON Root
+Prefix;
+
+LEXICON Prefix
+@P.UN.ON@UN+:@P.UN.ON@un Verb;
+       Verb;
+
+LEXICON Verb
+
+@C.UN@do    Vinf;
+drink Vinf;
+pay   Vinf;
+
+
+LEXICON Vinf
+
+able    Adjinf;
+@D.UN@+V+Inf:@D.UN@ #;
+
+LEXICON Adjinf
++Adj:0      #;
++Adj+Pl:s   #;</pre><p>Note the following things: </p><ul><li>We declared the flags together with the other multi-character symbols </li><li>We put a <tt>@P.UN.ON@</tt>-flag on the un-prefix </li><li>We put a <tt>@D.UN@</tt>-flag on the infinitive </li><li>We put a <tt>@C.UN@</tt>-flag on the do-lemma </li><li>We put the flags on both sides (the upper side, and lower side), and made sure they lined up by putting them first in the string whenever we had upper<tt>:</tt>lower entry pairs. </li></ul><p>The flags in this grammar interact as follows to capture the phenomena we require: </p><ul><li>do gives the value <tt>ON</tt> to the feature named <tt>UN</tt> (<tt>@P.UN.ON@</tt>), (positive set)  </li><li>the bare infinitive disallows the feature <tt>UN</tt> to have any value <tt>@D.UN@</tt> (disallow) </li></ul><p>Now, this leads to that, even though lexc generates the combination </p><pre class="prettyprint">@P.UN.ON@unpay@D.UN@</pre><p>the apply runtime sees that the feature <tt>UN</tt> was first set, and later in the same string disallowed to have any value, thus blocking this word <tt>[</tt>we could have used <tt>@D.UN.ON@</tt> just as well: this would have disallowed <tt>UN</tt> to have the specific value <tt>ON</tt> whereas we disallowed any value at all by <tt>@D.UN@</tt>.<tt>]</tt> This gets us almost everything, with the exception that we want to allow <tt>undo</tt>, unlike the two other un-VERB combinations.  That is handled by the <tt>@C.UN@</tt>-flag, which <i>clears</i> any value the feature <tt>UN</tt> may have.  In other words, for that particular combination, <i>lexc</i> generates: </p><pre class="prettyprint">@P.UN.ON@un@C.UN@do@D.UN@</pre><p>And in this case, the runtime flag-watcher has no problem accepting it because the feature <tt>UN</tt> was cleared before it was disallowed. </p><p>If you load this file in <i>foma</i>, it will actually still say it accepts 18 paths: </p><pre class="prettyprint">Root...1, Prefix...2, Verb...3, Vinf...2, Adjinf...2
+Building lexicon...Determinizing...Minimizing...Done!
+1.2 kB. 21 states, 27 arcs, 18 paths.</pre><p>However, doing a <tt>lower-words</tt> will only print out 16 - those words that are accepted. </p><h4><a name="Flag_commands"></a>Flag commands<a href="#Flag_commands" class="section_anchor"></a></h4><p>If you want to see the flags in the output, you can issue: </p><pre class="prettyprint">set show-flags ON</pre><p>And now, <tt>lower-words</tt> or <tt>upper-words</tt> gives something like: </p><pre class="prettyprint">@P.UN.ON@un@C.UN@do@D.UN@</pre><p>Foma can also calculate the equivalent transducer without the flags present by <tt>eliminate flags</tt> </p><pre class="prettyprint">foma[1]: eliminate flags
+1.3 kB. 26 states, 32 arcs, 16 paths.</pre><p>And now we see that after the flags have been purged and an equivalent FST calculated, the number of paths has been reduced to 16, since they are no longer part of the FST at all. </p><p>If you want the <i>foma</i> apply commands to disregard flag constraints, say for debugging purposes, you can also issue the command: </p><pre class="prettyprint">set obey-flags OFF</pre><h4><a name="Flags_and_replacement_rules"></a>Flags and replacement rules<a href="#Flags_and_replacement_rules" class="section_anchor"></a></h4><p>A common trap with using flag diacritics is to forget that they are actual symbols in the transducers.  This often manifests itself in the design of replacement rules.  Consider a rule like: </p><pre class="prettyprint">b -&gt; p || _ .#. ;</pre><p>This rule changes <strong>b</strong> to <strong>p</strong> at the end of a word. Now, if the word is designed with a flag-bearing grammar, it may actually look like: </p><pre class="prettyprint">blab@U.SOMEFEATURE.SOMEVALUE@</pre><p>although the flag is never seen when the strings are printed.  In this case the rule will not apply. There are two easy remedies for this: </p><ul><li>Make rules flag-aware: </li></ul><pre class="prettyprint">b -&gt; p || _ (&quot;@U.SOMEFEATURE.SOMEVALUE@&quot;) .#. ;</pre><p>  or </p><ul><li>Issue the command <tt>set flag-is-epsilon ON</tt> in the <i>foma</i> interface <strong>before</strong> composing the lexicon with the replacement rules. </li></ul><p>The following general guidelines should help to steer clear of trouble with flag diacritics: </p><ul><li>Declare all flags as <tt>Multicharacter_Symbols</tt> in lexc. </li><li>Make sure the flags are both on the upper and lower side in lexc, aligned. Put the flag first (before the morpheme) in a lexc entry, and on both sides of the colon if the entry is two-level. </li><li>Use <tt>set show-flags ON</tt> when debugging. </li><li>Make sure the replacement rules take the flag symbols into account. </li></ul>
+ </div>
+ </div>
+ </td><tr>
+</table>
+ </div>
+
+
+
+</article>
+
+ </body>
+</html>
+
+
+
+
+
+
+
+<!--
+     FILE ARCHIVED ON 14:01:00 Jan 4, 2016 AND RETRIEVED FROM THE
+     INTERNET ARCHIVE ON 22:26:23 Sep 2, 2016.
+     JAVASCRIPT APPENDED BY WAYBACK MACHINE, COPYRIGHT INTERNET ARCHIVE.
+
+     ALL OTHER CONTENT MAY ALSO BE PROTECTED BY COPYRIGHT (17 U.S.C.
+     SECTION 108(a)(3)).
+-->
