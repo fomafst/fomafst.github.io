@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PyFoma.js – FST playground</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --panel: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --accent: #2563eb;
+      --border: rgba(2,6,23,.12);
+      --err: #b91c1c;
+      --btnbg: rgba(37,99,235,.10);
+      --btnbd: rgba(37,99,235,.25);
+    }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+    header .spacer { flex: 1; }
+    header label { color: var(--muted); font-size: 12px; }
+    select {
+      font-size: 12px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      outline: none;
+    }
+    main {
+      display: grid;
+      /* Make the left column ~20% narrower to give more room to graphs/output. */
+      grid-template-columns: 0.75fr 1.25fr;
+      gap: 12px;
+      padding: 12px;
+      height: calc(100vh - 56px);
+      box-sizing: border-box;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel .bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel .bar .title { font-size: 13px; font-weight: 650; }
+    .panel .bar .spacer { flex: 1; }
+    button {
+      background: var(--btnbg);
+      color: var(--text);
+      border: 1px solid var(--btnbd);
+      padding: 6px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button:hover { background: rgba(37,99,235,.14); }
+    textarea {
+      /* The textarea is the real editor for selection/caret/input.
+         We render syntax coloring in the overlay <pre>. */
+      width: 100%;
+      height: 100%;
+      resize: none;
+      border: 0;
+      outline: 0;
+      padding: 12px;
+      box-sizing: border-box;
+      background: transparent;
+      color: transparent;      /* text comes from overlay */
+      caret-color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New";
+      font-size: 13px;
+      line-height: 1.35;
+      tab-size: 4;
+      /* Default: WRAP long lines (user can toggle off for horizontal scrolling). */
+      white-space: pre-wrap;
+      overflow: auto;
+      overflow-x: hidden;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      user-select: none;
+    }
+    .toggle input {
+      width: 14px;
+      height: 14px;
+      accent-color: var(--accent);
+    }
+
+    .editorWrap {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+    }
+    #code {
+      position: absolute;
+      inset: 0;
+    }
+    #codeHL {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      padding: 12px;
+      box-sizing: border-box;
+      /* The overlay must be scrollable (programmatically) so it stays aligned
+         with the textarea even for very large documents. */
+      overflow: auto;
+      white-space: pre-wrap;
+      pointer-events: none;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New";
+      font-size: 13px;
+      line-height: 1.35;
+      tab-size: 4;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      color: var(--text);
+    }
+    /* Hide overlay scrollbars (the textarea provides the visible scrollbar). */
+    #codeHL { scrollbar-width: none; }
+    #codeHL::-webkit-scrollbar { width: 0; height: 0; }
+    #codeHL .comment { color: #77A64C; }
+    #codeHL .cmt { color: #77A64C; }
+    #console {
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.35;
+      color: var(--text);
+      overflow: auto;
+      white-space: pre-wrap;
+      border-top: 1px solid var(--border);
+      background: #fbfcfe;
+    }
+    .out { color: var(--text); }
+    .err { color: var(--err); }
+    #graph {
+      flex: 1;
+      overflow: hidden;
+      background: #ffffff;
+      touch-action: none;
+    }
+    #graph .placeholder { padding: 12px; color: var(--muted); font-size: 12px; }
+    #graph svg {
+      /* Default: do NOT upscale small graphs. */
+      width: auto;
+      height: auto;
+      max-width: 100%;
+      max-height: 100%;
+      display: block;
+      margin: 0;
+    }
+
+    /* When we wrap the SVG for pan/zoom, remove max constraints so scaling works naturally. */
+    #graph .graph-inner svg {
+      max-width: none;
+      max-height: none;
+    }
+    .footer {
+      padding: 10px 12px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+      background: #fbfcfe;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    code { background: rgba(2,6,23,.06); padding: 1px 5px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>PyFoma.js</h1>
+  <label for="demoSelect">Demo</label>
+  <select id="demoSelect"></select>
+  <div class="spacer"></div>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="bar">
+      <div class="title">Program</div>
+      <div class="spacer"></div>
+      <label class="toggle" title="Wrap long lines">
+        <input id="wrapToggle" type="checkbox" checked /> Wrap
+      </label>
+      <button id="runBtn">Run</button>
+      <button id="clearBtn">Clear output</button>
+    </div>
+    <div class="editorWrap">
+      <pre id="codeHL" aria-hidden="true"></pre>
+      <textarea id="code" spellcheck="false" wrap="soft">$consonant = /[a-z] - [aeiou]/
+// Introduction
+    
+// This demoes a pyfoma port to js (see https://github.com/mhulden/pyfoma)
+// You can compile regexes into finite-state automata and transducers
+// Everything runs in the browser
+
+// Writing /regex/ by itself compiles a regex an immediately displays it
+
+// You can also write regexes and store the FSTs into variables. Example:
+
+// $consonant = [a-z] - [aeiou]
+
+// ... and then re-use the definition in new regexes:
+
+// $syllable = $consonant+ [aeiou] $consonant+
+
+// view($variable) displays the FST
+// generate($variable, string, string, ...) passes strings to the FST
+// analyze($variable, string, string, ...) does the inverse calculation
+
+// Example:
+
+$myfst = $^rewrite(a:b / c _ d)
+view($myfst)
+generate($myfst, cadcab, cab)
+analyze($myfst, cbd) 
+
+// You can save an FST in .foma format for
+// import into foma or pyfoma, with 
+// tofoma($myfst)
+// and then "Save output..."
+
+// See pull-down menu above for more examples
+</textarea>
+    </div>
+    <div class="footer">
+      Graph rendering uses <code>viz.js</code> 2.1.2 via unpkg.
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="bar">
+      <div class="title">Output</div>
+      <div class="spacer"></div>
+      <button id="saveBtn">Save output…</button>
+      <button id="fitBtn">Fit graph</button>
+    </div>
+    <div id="graph"><div class="placeholder">(No graph yet. Run <code>view(...)</code>.)</div></div>
+    <div id="console"></div>
+  </section>
+</main>
+
+<!-- Graphviz in the browser (Viz.js 2.x). -->
+<script src="https://unpkg.com/viz.js@2.1.2/viz.js"></script>
+<script src="https://unpkg.com/viz.js@2.1.2/full.render.js"></script>
+
+<!-- Our app -->
+<script type="module" src="./site.js"></script>
+</body>
+</html>
