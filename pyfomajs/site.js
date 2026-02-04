@@ -914,19 +914,19 @@ generate($sbify, abracadabra, creativity)
     name: 'Rewrite rules with weights',
     code: `// Rewrite rules with weights
 
-// Always delete xs at cost of 1.0
+// Always replace xs with ys at cost of 1.0
 $rule1 = $^rewrite(x:y<1.0>)
 generate($rule1, xxx)
 
-// Optionally delete xs at cost of 1.0
+// Optionally replace xs at cost of 1.0
 $rule2 = $^rewrite(x:?y<1.0>)
 generate($rule2, xxx)
 
-// Optionally delete xs at cost of 1.0, but only at word edges
+// Optionally replace xs at cost of 1.0, but only at word edges
 $rule3 = $^rewrite(x:?y<1.0> / # _ , _ #)
 generate($rule3, xxx)
 
-// Always delete xs at cost of 1.0, but only after a previous x
+// Always replace xs at cost of 1.0, but only after a previous x
 $rule4 = $^rewrite(x:y<1.0> / x _ )
 generate($rule4, xxx)
 
