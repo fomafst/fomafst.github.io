@@ -1882,6 +1882,7 @@ export class FST {
     }
 
     const defs = { crossproducts: this.copyMod() };
+    for (const s of ["@<@", "@>@", "#"]) defs.crossproducts.alphabet.add(s);
     defs.br = FST.re("'@<@'|'@>@'");
     defs.aux = FST.re(". - ($br|#)", defs);
     defs.dotted = FST.re(".*-(.* '@<@' '@>@' '@<@' '@>@' .*)");
