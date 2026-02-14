@@ -335,7 +335,17 @@ class RegexParse {
   constructor(regExp, defined, functions) {
     this.defined = defined;
     this.functions = {};
-    for (const f of functions) this.functions[f.name] = f;
+    // Custom functions are passed in as an iterable. We accept either:
+    //   - a callable function (uses f.name)
+    //   - an object { name: string, fn: function }
+    for (const f of functions) {
+      if (typeof f === 'function') {
+        if (!f.name) continue;
+        this.functions[f.name] = f;
+      } else if (f && typeof f === 'object' && typeof f.name === 'string' && typeof f.fn === 'function') {
+        this.functions[f.name] = f.fn;
+      }
+    }
     this.expression = regExp;
     this.tokenized = this._insertInvisibles(this.tokenize());
     this.parsed = this.parse();
@@ -570,7 +580,8 @@ class RegexParse {
     let counter = 0;
     const result = [];
     for (const [token, value, ln, col] of tokens) {
-      if (counter === 1 && (token === "LPAREN" || token === "COMPLEMENT" || RegexParse.operands.has(token))) {
+      if (counter === 1 && (token === "LPAREN" || token === "COMPLEMENT" || token === "FUNC" || RegexParse.operands.has(token))) {
+
         result.push(["CONCAT", "", ln, col]);
         counter = 0;
       }
@@ -767,6 +778,68 @@ class RegexParse {
 // ------------------------
 
 export class FST {
+  // ----------------------------------------------------------------------
+  // Macro / function registry
+  //
+  // Macros are user-defined regex templates that can be invoked inside
+  // regexes via $^name(...), just like built-in functions.
+  //
+  // A macro is defined as:  def name(x, y): /regex using $x and $y/
+  // and used as:            /.* - $^name(foo, bar)/
+  //
+  // Implementation strategy (JS-friendly): treat macros as functions that
+  // compile their body with a temporary definitions environment mapping
+  // param names to the argument FSTs.
+  // ----------------------------------------------------------------------
+
+  static _macros = new Map(); // name -> { params: string[], body: string }
+
+  static defineMacro(name, params, body) {
+    if (!name || typeof name !== 'string') throw new Error('Macro name must be a string.');
+    const ps = Array.isArray(params) ? params.map((p) => String(p).trim()).filter(Boolean) : [];
+    let b = String(body ?? '').trim();
+    // Allow the user to provide /.../ or raw regex.
+    if (b.startsWith('/') && b.endsWith('/') && b.length >= 2) b = b.slice(1, -1);
+    FST._macros.set(name, { params: ps, body: b });
+  }
+
+  static listMacros() {
+    return Array.from(FST._macros.keys()).sort();
+  }
+
+  static clearMacros() {
+    FST._macros.clear();
+  }
+
+  static _macroFunctions(defined, functions) {
+    // Convert macro registry to function objects understood by RegexParse.
+    // Custom functions passed by the caller should override macros.
+    const overridden = new Set();
+    for (const f of functions) {
+      if (typeof f === 'function' && f.name) overridden.add(f.name);
+      else if (f && typeof f === 'object' && typeof f.name === 'string') overridden.add(f.name);
+    }
+    const out = [];
+    for (const [name, spec] of FST._macros.entries()) {
+      if (overridden.has(name)) continue;
+      out.push({
+        name,
+        fn: (...args) => {
+          const kwargs = args.length ? args[args.length - 1] : {};
+          const realArgs = args.length ? args.slice(0, -1) : [];
+          if (realArgs.length !== spec.params.length) {
+            throw new SyntaxError(`Macro "${name}" expects ${spec.params.length} args, got ${realArgs.length}.`);
+          }
+          const localDefs = { ...defined };
+          for (let i = 0; i < spec.params.length; i++) localDefs[spec.params[i]] = realArgs[i];
+          // Compile the macro body in the caller's environment.
+          return FST.re(spec.body, localDefs, functions);
+        },
+      });
+    }
+    return out;
+  }
+
   static characterRanges(ranges, complement = false) {
     const newfst = new FST();
     const second = new State();
@@ -793,7 +866,10 @@ export class FST {
   }
 
   static regex(regExp, defined = {}, functions = new Set()) {
-    const rp = new RegexParse(regExp, defined, functions);
+    // Always include macros (as functions) unless the caller overrides them.
+    const fnSet = new Set(functions);
+    for (const mf of FST._macroFunctions(defined, fnSet)) fnSet.add(mf);
+    const rp = new RegexParse(regExp, defined, fnSet);
     return rp.compiled;
   }
 
@@ -1882,7 +1958,6 @@ export class FST {
     }
 
     const defs = { crossproducts: this.copyMod() };
-    for (const s of ["@<@", "@>@", "#"]) defs.crossproducts.alphabet.add(s);
     defs.br = FST.re("'@<@'|'@>@'");
     defs.aux = FST.re(". - ($br|#)", defs);
     defs.dotted = FST.re(".*-(.* '@<@' '@>@' '@<@' '@>@' .*)");

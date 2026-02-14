@@ -595,6 +595,20 @@ async function execLine(line) {
   const raw = stripComments(line).trim();
   if (isBlank(raw)) return;
 
+  // Macro definition:
+  //   def name(x, y): /regex using $x and $y/
+  // Stored globally in FST so it is available inside future regexes as $^name(...)
+  const mdef = raw.match(/^def\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*:\s*(.+)\s*$/);
+  if (mdef) {
+    const name = mdef[1];
+    const params = String(mdef[2] ?? '').trim()
+      ? String(mdef[2]).split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+    const body = String(mdef[3] ?? '').trim();
+    FST.defineMacro(name, params, body);
+    return;
+  }
+
   // Assignment: $name = /regex/ (or = regex)
   const assign = raw.match(/^\$(\w+)\s*=\s*(.+)$/);
   if (assign) {
@@ -851,35 +865,27 @@ analyze($myfst, cbd)
 
 `,
   },
+
   {
-    name: 'English morphological analyzer',
-    code: `// English morphological analyzer (toy)
+    name: 'Macros',
+    code: `// Macros
+// You can define macros with def foo(bar): /regex that contains $bar/
 
-// A few base nouns
-$noun = cat|dog|church|mouse|fox|fly
+// Macros can contain any number of arguments.
 
-// We add either [N][Pl] -> +s or [N][Sg] -> '' (nothing) after the noun
-$lexicon = $noun (('[N]' '[Pl]'):('+' s) | ('[N]' '[Sg]'):'')
+// Shuffle two strings
+def shuffle(x,y): /$^output($x @ (.|'':.)*) & $^output($y @ (.|'':.)*) /
+$shuffled = $^shuffle(cat,dog)
 
-// Define sibilants, the sounds after which we insert e when pluralizing
-$sibilant = s|z|sh|ch|z|x
+// Macros can call other macros
+// Same as above but broken into two macros:
 
-// Insert e between sibilants at morpheme boundary (fox+s > foxe+s)
-$erule = $^rewrite('':e / $sibilant _ '+' s)
+def insertany(x): / $^output($x @ (.|'':.)*) /
+def shuffle2(x,y): /$^insertany($x) & $^insertany($y)/
 
-// y changes to ie at plural
-$irule = $^rewrite(y:(ie) / _ '+' s)
-
-// Remove morpheme boundaries after rules have applied
-$cleanup = $^rewrite('+':'')
-
-// Full grammar
-$grammar = $lexicon @ $erule @ $irule @ $cleanup
-
-// View FST and generate and analyze some words
-view($grammar)
-generate($grammar, cat[N][Pl], church[N][Pl])
-analyze($grammar, dogs, flies)`,
+$shuffledagain = $^shuffle2(cat,dog)
+view($shuffledagain)
+`,
   },
   {
     name: 'Syllabifier',
@@ -914,19 +920,19 @@ generate($sbify, abracadabra, creativity)
     name: 'Rewrite rules with weights',
     code: `// Rewrite rules with weights
 
-// Always replace xs with ys at cost of 1.0
+// Always delete xs at cost of 1.0
 $rule1 = $^rewrite(x:y<1.0>)
 generate($rule1, xxx)
 
-// Optionally replace xs at cost of 1.0
+// Optionally delete xs at cost of 1.0
 $rule2 = $^rewrite(x:?y<1.0>)
 generate($rule2, xxx)
 
-// Optionally replace xs at cost of 1.0, but only at word edges
+// Optionally delete xs at cost of 1.0, but only at word edges
 $rule3 = $^rewrite(x:?y<1.0> / # _ , _ #)
 generate($rule3, xxx)
 
-// Always replace xs at cost of 1.0, but only after a previous x
+// Always delete xs at cost of 1.0, but only after a previous x
 $rule4 = $^rewrite(x:y<1.0> / x _ )
 generate($rule4, xxx)
 
